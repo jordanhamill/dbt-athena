@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, NamedTuple, Tuple
 from urllib.parse import urlparse
 from uuid import uuid4
 import agate
@@ -15,6 +15,76 @@ def _chunk_list(lst: List[Any], n: int) -> List[Any]:
     """Yield successive n-sized chunks from lst."""
     for i in range(0, len(lst), n):
         yield lst[i : i + n]
+
+
+class SQLFilter(NamedTuple):
+    column: str
+    statement: str
+
+    @classmethod
+    def from_dict(cls, dict_filter) -> str:
+        conditions = []
+        for column, filters in dict_filter.items():
+            conditions.append(cls.column_filter(column, filters))
+
+        conditions = (condition.statement for condition in conditions)
+        return " and ".join(conditions)
+
+    @classmethod
+    def column_filter(cls, column: str, filter: Dict):
+        if not isinstance(filter, dict):
+            raise ValueError(f"Filter must be a dict, got {type(filter)}.")
+
+        methods = {
+            "equals": cls.equals,
+            "not_equals": cls.not_equals,
+            "between": cls.between,
+            "in": cls.in_,
+        }
+        for method_name, method in methods.items():
+            if method_name in filter:
+                return method(column, filter)
+        raise ValueError(f"No valid filters found in {list(methods.keys())}")
+
+    @classmethod
+    def equals(cls, column: str, filter: Dict):
+        value = filter["equals"]
+        escaped = cls.escape(value)
+        return SQLFilter(column, f"{column} = {escaped}")
+
+    @classmethod
+    def not_equals(cls, column: str, filter: Dict):
+        value = filter["not_equals"]
+        escaped = cls.escape(value)
+        return SQLFilter(column, f"{column} <> {escaped}")
+
+    @classmethod
+    def between(cls, column: str, filter: Dict):
+        start = filter["between"]["start"]
+        end = filter["between"]["end"]
+        escaped_start = cls.escape(start)
+        escaped_end = cls.escape(end)
+        return SQLFilter(column, f"{column} between {escaped_start} and {escaped_end}")
+
+    @classmethod
+    def in_(cls, column: str, filter: Dict):
+        values = filter["in"]
+        escaped = ", ".join((cls.escape(value) for value in values))
+        return SQLFilter(column, f"{column} in ({escaped})")
+
+    @classmethod
+    def escape(cls, value: Any) -> str:
+        if isinstance(value, dict) and "raw_sql" in value:
+            return value["raw_sql"]
+        return cls._terrible_basic_sql_escape(value)
+
+    @staticmethod
+    def _terrible_basic_sql_escape(value: Any) -> str:
+        if isinstance(value, str):
+            return f"'{value}'"
+        if isinstance(value, (date, datetime)):
+            return f"'{value}'"
+        return str(value)
 
 
 class AthenaAdapter(SQLAdapter):
@@ -71,34 +141,15 @@ class AthenaAdapter(SQLAdapter):
             }
         }
         """
-        query = f'select "$path" as s3_url from {relation.render()}'
-        conditions = []
-        for partition_column, partition_value in partitions.items():
-            if isinstance(partition_value, dict):
-                if "between" in partition_value:
-                    between = partition_value["between"]
-                    start = self._terrible_basic_sql_escape(between["start"])
-                    end = self._terrible_basic_sql_escape(between["end"])
-                    conditions.append(f"{partition_column} between {start} and {end}")
-                elif "in" in partition_value:
-                    comma_separated = ", ".join(
-                        (
-                            self._terrible_basic_sql_escape(value)
-                            for value in partition_value["in"]
-                        )
-                    )
-                conditions.append(f"{partition_column} in ({comma_separated})")
-            else:
-                conditions.append(
-                    f"{partition_column} = {self._terrible_basic_sql_escape(partition_value)}"
-                )
-
-        where = " where " + (" and ".join(conditions))
+        query = f'select distinct "$path" as s3_url from {relation.render()}'
+        conditions = SQLFilter.from_dict(partitions)
+        where = " where " + conditions
         if conditions:
             query += where
         elif not allow_no_parttions:
             raise ValueError("Must provide `partitions`")
 
+        print(query)
         _, table = self.execute(sql=query, auto_begin=True, fetch=True)
         s3_urls = [row["s3_url"] for row in table.rows]
         return s3_urls
@@ -113,9 +164,9 @@ class AthenaAdapter(SQLAdapter):
 
         s3 = boto3.client("s3")
 
-        for chunk in _chunk_list(bucket_and_keys, 1000):
-            print(f"Deleting {len(chunk)}...")
+        print(f"Deleting {len(bucket_and_keys)} objects from S3...")
 
+        for chunk in _chunk_list(bucket_and_keys, 1000):
             s3.delete_objects(
                 Bucket=bucket,
                 Delete={

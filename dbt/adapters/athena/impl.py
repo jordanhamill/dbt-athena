@@ -11,6 +11,12 @@ from dbt.adapters.athena import AthenaConnectionManager
 from dbt.adapters.athena.relation import AthenaRelation
 
 
+def _chunk_list(lst: List[Any], n: int) -> List[Any]:
+    """Yield successive n-sized chunks from lst."""
+    for i in range(0, len(lst), n):
+        yield lst[i : i + n]
+
+
 class AthenaAdapter(SQLAdapter):
     ConnectionManager = AthenaConnectionManager
     Relation = AthenaRelation
@@ -102,20 +108,21 @@ class AthenaAdapter(SQLAdapter):
         if not s3_urls:
             return
 
-        if len(s3_urls) > 1000:
-            assert False, "Need to allow deleting more than 1000 parquet files"
-
         bucket_and_keys = [self._s3_bucket_and_object_key(url) for url in s3_urls]
         bucket = bucket_and_keys[0][0]
 
         s3 = boto3.client("s3")
-        s3.delete_objects(
-            Bucket=bucket,
-            Delete={
-                "Objects": [{"Key": key} for _, key in bucket_and_keys],
-                "Quiet": False,
-            },
-        )
+
+        for chunk in _chunk_list(bucket_and_keys, 1000):
+            print(f"Deleting {len(chunk)}...")
+
+            s3.delete_objects(
+                Bucket=bucket,
+                Delete={
+                    "Objects": [{"Key": key} for _, key in chunk],
+                    "Quiet": False,
+                },
+            )
 
     def _terrible_basic_sql_escape(self, value: Any) -> str:
         if isinstance(value, str):
@@ -134,11 +141,3 @@ class AthenaAdapter(SQLAdapter):
     def _s3_bucket_and_object_key(self, s3_url) -> Tuple[str, str]:
         parsed = urlparse(s3_url, allow_fragments=False)
         return parsed.netloc, parsed.path.lstrip("/")
-
-    def _s3_delete_objects(self, bucket: str, key_prefix: str) -> None:
-        if not key_prefix:
-            return
-
-        s3 = boto3.resource("s3")
-        bucket = s3.Bucket(bucket)
-        bucket.objects.filter(Prefix=key_prefix).delete()

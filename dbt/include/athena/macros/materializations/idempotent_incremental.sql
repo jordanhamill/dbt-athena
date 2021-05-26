@@ -19,6 +19,8 @@
   {{ run_hooks(pre_hooks, inside_transaction=True) }}
 
   {% set to_drop = [] %}
+  {% set existing_s3_urls = [] %}
+
   {% if existing_relation is none %}
       {% set build_sql = create_table_as(False, target_relation, sql) %}
   {% elif existing_relation.is_view or should_full_refresh() %}
@@ -27,8 +29,6 @@
   {% else %}
       {% set overwrite_partitions_where = config.require('overwrite_partitions_where') %}
       {% set existing_s3_urls = adapter.s3_list_objects_in_partitions(existing_relation, overwrite_partitions_where) %}
-      {{ log(existing_s3_urls, info=true) }}
-      {% do adapter.s3_delete_objects(existing_s3_urls) %}
 
       {% set tmp_relation = make_temp_relation(target_relation) %}
       {% do run_query(create_table_as(True, tmp_relation, sql)) %}
@@ -44,6 +44,8 @@
   {% if not to_drop %}
     {{ set_table_classification(target_relation, 'parquet') }}
   {% endif %}
+
+  {% do adapter.s3_delete_objects(existing_s3_urls) %}
 
   {% do persist_docs(target_relation, model) %}
 

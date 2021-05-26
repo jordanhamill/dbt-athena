@@ -28,6 +28,19 @@
       {% set build_sql = create_table_as(False, target_relation, sql) %}
   {% else %}
       {% set overwrite_partitions_where = config.require('overwrite_partitions_where') %}
+      {% set overwrite_column_names = (overwrite_partitions_where | list | sort) %}
+      {% set partitioned_by = config.get('partitioned_by', default=[]) %}
+
+      {%- for col in overwrite_column_names -%}
+        {% if col not in partitioned_by %}
+          {% set error_msg %}
+            Invalid column name(s) in `{{ this.identifier }}` config `overwrite_partitions_where`.
+            Keys must be a partition column ({{ partitioned_by | join(', ') }}).
+          {% endset %}
+          {% do exceptions.raise_compiler_error(error_msg) %}
+        {% endif %}
+      {% endfor %}
+
       {% set existing_s3_urls = adapter.s3_list_objects_in_partitions(existing_relation, overwrite_partitions_where) %}
 
       {% set tmp_relation = make_temp_relation(target_relation) %}
